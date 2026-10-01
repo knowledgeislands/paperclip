@@ -804,22 +804,30 @@ describe("persistent agent directories", () => {
     } finally { shell.mockRestore(); }
   });
 
-  it("requires independent current local stop proof before cleaning an unavailable copy", async () => {
+  it.each([false, true])("preserves uncollected local edits and their unavailable receipt even after local stop proof (%s)", async stopped => {
     const copy = await run();
+    await fs.writeFile(path.join(copy.localRoot, "unsaved-local.txt"), "recoverable local edit");
     await db.update(heartbeatRuns).set({ status: "failed", runtimeMode: "native" }).where(eq(heartbeatRuns.id, copy.runId));
     await copies.reportUnavailable(companyId, copy.runId);
+    if (stopped) await db.insert(heartbeatRunEvents).values({ companyId, runId: copy.runId, agentId, seq: 1, eventType: "native.local_process_stopped", stream: "system", level: "info", message: "fixture stop" });
+    const before = (await copies.get(companyId, copy.runId))!;
+    expect(before).toMatchObject({ state: "unavailable", attempts: 0, processStoppedAt: null });
     await copies.recoverStopped();
-    expect((await copies.get(companyId, copy.runId))?.processStoppedAt).toBeNull();
-    await db.insert(heartbeatRunEvents).values({ companyId, runId: copy.runId, agentId, seq: 1, eventType: "native.local_process_stopped", stream: "system", level: "info", message: "fixture stop" });
-    await db.update(agentInstructionWorkingCopies).set({ nextAttemptAt: null }).where(eq(agentInstructionWorkingCopies.runId, copy.runId));
-    await copies.recoverStopped();
-    expect(await copies.get(companyId, copy.runId)).toMatchObject({ state: "unavailable", errorCode: "INSTRUCTION_COLLECTION_UNAVAILABLE", receipt: { cleanupPending: false } });
-    await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    const patch = vi.fn(async () => { throw new Error("local copy must not be changed"); });
+    await agentDirectoryWorkingCopyService(db, copies.get, patch).recoverUnavailable(before);
+    expect(patch).not.toHaveBeenCalled();
+    expect(await copies.get(companyId, copy.runId)).toEqual(before);
+    expect(await fs.readFile(path.join(copy.localRoot, "unsaved-local.txt"), "utf8")).toBe("recoverable local edit");
+    await expect(fs.stat(path.join(root, "unsaved-local.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("serializes same-run preparation after recovery commits stop proof and before it removes bytes", async () => {
-    const copy = await run();
-    await copies.reportUnavailable(companyId, copy.runId);
+    const { copy, lease } = await unavailableRemote({ state: "destroyed" });
+    const remoteCwd = "/fixture/cleanup-task";
+    const executionTarget = { kind: "remote" as const, transport: "ssh" as const, environmentId: lease.environmentId, leaseId: lease.id, remoteCwd,
+      spec: { host: "unused.invalid", port: 22, username: "test", remoteCwd } };
+    const shell = vi.spyOn(executionTargetTools, "runAdapterExecutionTargetShellCommand").mockResolvedValue({ exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" });
+    const stage = vi.spyOn(ssh, "syncDirectoryToSsh").mockResolvedValue(undefined);
     let stopCommitted!: () => void, finishCleanup!: () => void;
     const committed = new Promise<void>(resolve => { stopCommitted = resolve; });
     const proceed = new Promise<void>(resolve => { finishCleanup = resolve; });
@@ -828,21 +836,23 @@ describe("persistent agent directories", () => {
       if (values.processStoppedAt) { stopCommitted(); await proceed; }
       return updated!;
     });
-    const recovering = directories.recoverUnavailable((await copies.get(companyId, copy.runId))!, async () => true);
+    const recovering = directories.recoverUnavailable(copy);
     await committed;
     let prepareSettled = false;
-    const preparing = copies.prepare({ ...target(), runId: copy.runId, cwd: home }).then(row => { prepareSettled = true; return row; });
+    const preparing = copies.prepare({ ...target(), runId: copy.runId, cwd: home, target: executionTarget }).then(row => { prepareSettled = true; return row; });
     try {
-      await new Promise(resolve => setTimeout(resolve, 100));
-      expect(prepareSettled).toBe(false);
-      expect((await copies.get(companyId, copy.runId))?.state).toBe("unavailable");
-    } finally { finishCleanup(); await recovering; }
-    const prepared = await preparing;
-    expect(prepared).toMatchObject({ state: "prepared", processStoppedAt: null });
-    expect(await fs.readFile(path.join(copy.localRoot, entryFile), "utf8")).toBe(initial);
-    // A stale cleanup callback now observes the live lifecycle and does nothing.
-    await directories.release(copy);
-    expect(await fs.readFile(path.join(copy.localRoot, entryFile), "utf8")).toBe(initial);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        expect(prepareSettled).toBe(false);
+        expect((await copies.get(companyId, copy.runId))?.state).toBe("unavailable");
+      } finally { finishCleanup(); await recovering; }
+      const prepared = await preparing;
+      expect(prepared).toMatchObject({ state: "prepared", processStoppedAt: null });
+      expect(await fs.readFile(path.join(copy.localRoot, entryFile), "utf8")).toBe(initial);
+      // A stale cleanup callback now observes the live lifecycle and does nothing.
+      await directories.release(copy);
+      expect(await fs.readFile(path.join(copy.localRoot, entryFile), "utf8")).toBe(initial);
+    } finally { shell.mockRestore(); stage.mockRestore(); }
   });
 
   it("keeps stopped pending cleanup behind a held lock and lets recovery proceed to other agents", async () => {
@@ -946,7 +956,7 @@ describe("persistent agent directories", () => {
           if (values.processStoppedAt) throw new Error("fixture lost update response after commit");
           return updated!;
         });
-        await expect(directories.recoverUnavailable((await copies.get(companyId, runId))!, async () => false)).rejects.toThrow("lost update response");
+        await expect(directories.recoverUnavailable((await copies.get(companyId, runId))!)).rejects.toThrow("lost update response");
         expect((await copies.get(companyId, runId))?.receipt?.cleanupDestroyedOnly).toBe(true);
         await copies.recoverCaptured();
       } else await copies.recoverStopped();

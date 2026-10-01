@@ -345,17 +345,17 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       row.executionRoot === path.posix.join(remoteCwd, ".paperclip-runtime", "agent-files", row.agentId, String(row.receipt?.directoryRunId ?? row.runId)) &&
       hasRemoteTerminationReceipt(lease) && (lease.metadata?.remoteExecutionTermination as { state?: string }).state === "destroyed";
   }
-  async function recoverUnavailable(row: Copy, hasLocalStopProof: () => Promise<boolean>) {
-    const eligible = (current: Copy) => current.state === "unavailable" && !current.processStoppedAt;
-    const stopped = (current: Copy) => current.location === "local" ? hasLocalStopProof() : destroyedRemoteCopy(current);
+  async function recoverUnavailable(row: Copy) {
+    const eligible = (current: Copy) => isAgentDirectoryCopy(current) && current.location.startsWith("remote:") &&
+      current.state === "unavailable" && !current.processStoppedAt;
     // Do not wait for a directory lock when no cleanup can be authorized.
-    if (!eligible(row) || !await stopped(row)) return;
+    if (!eligible(row) || !await destroyedRemoteCopy(row)) return;
     await serial(row, async current => {
-      if (!eligible(current) || !await stopped(current)) return;
+      if (!eligible(current) || !await destroyedRemoteCopy(current)) return;
       // The no-execute authority must survive a crash after this update. Every
       // later release, including one with a cached transport, honors it.
       const confirmed = await patch(current, { processStoppedAt: new Date(),
-        ...(current.location !== "local" ? { receipt: { ...current.receipt, cleanupDestroyedOnly: true } } : {}) });
+        receipt: { ...current.receipt, cleanupDestroyedOnly: true } });
       // A concurrent preparation can win the receipt CAS. Its bytes stay live.
       if (confirmed.state === "unavailable" && confirmed.processStoppedAt) await release(confirmed);
     }, "agent_directory_release");

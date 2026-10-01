@@ -174,9 +174,10 @@ candidates are retained solely for upgrade compatibility.
 Crash recovery can collect a stopped working copy without starting a model.
 Cleanup does not wait for a directory lock before process-stop proof exists, or
 after the copy is superseded or cleanup is complete. An unavailable copy keeps
-its failed-save receipt. Recovery can later clean it after independent local
-stop proof or destruction of its exact remote lease. Recovery of an unavailable
-remote copy uses only exact destruction proof and executes no remote command.
+its failed-save receipt. Recovery can later clean an unavailable remote copy
+after destruction of its exact lease and executes no remote command. An
+unavailable local copy can still contain uncollected edits; this cleanup path
+preserves those bytes even if local stop proof arrives later.
 Deferred cleanup retries after a
 delay so one blocked copy does not prevent other copies from being cleaned.
 Re-preparing an existing run uses the same lock as cleanup and rechecks its

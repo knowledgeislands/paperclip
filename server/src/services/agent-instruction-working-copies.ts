@@ -318,13 +318,13 @@ export function agentInstructionWorkingCopyService(db: Db, options: { environmen
           and(eq(copies.state, "preparing"), sql`${copies.receipt}->>'schema' = 'paperclip.agent-files.v1'`)),
           lte(copies.attempts, MAX_COLLECTION_ATTEMPTS - 1)),
         and(eq(copies.state, "unavailable"), isNull(copies.processStoppedAt),
+          sql`${copies.location} like 'remote:%'`,
           sql`${copies.receipt}->>'schema' = 'paperclip.agent-files.v1'`)),
         inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"]),
         or(isNull(copies.nextAttemptAt), lte(copies.nextAttemptAt, new Date())))).orderBy(asc(copies.updatedAt)).limit(20);
     for (const { copy: row, runtimeMode } of pending) {
       if (row.state === "unavailable" && isAgentDirectoryCopy(row)) {
-        await recoverDirectoryCleanup(row, () => directories.recoverUnavailable(row, () =>
-          runtimeMode === "native" ? hasNativeLocalProcessStop(db, row.companyId, row.runId) : Promise.resolve(false)));
+        await recoverDirectoryCleanup(row, () => directories.recoverUnavailable(row));
       } else if (row.state === "preparing" && isAgentDirectoryCopy(row)) {
         // A provider cannot launch until preparation records "prepared". With
         // the owning run terminal, this is an interrupted staging copy only.
