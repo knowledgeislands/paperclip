@@ -16,7 +16,9 @@ const managedApi = vi.hoisted(() => ({
   list: vi.fn(async () => ({ currentUserId: "user-1", connections: [] })),
   loginResult: vi.fn(async () => ({ connectionId: "login-account", grantId: "login-grant" })),
   connectLocal: vi.fn(async () => ({ connectionId: "local-account", grantId: "local-grant" })),
-  startLocalLogin: vi.fn(async () => ({ sessionId: "local-attempt", command: "CODEX_HOME='/fixture/isolated-login' codex login", expiresAt: "2026-09-11T20:00:00Z" })),
+  startLocalLogin: vi.fn(async (_companyId: string, intent: { provider: string }) => ({ sessionId: "local-attempt",
+    command: intent.provider === "anthropic" ? "CLAUDE_CONFIG_DIR='/fixture/isolated-login' claude auth login" : "CODEX_HOME='/fixture/isolated-login' codex login",
+    expiresAt: "2026-09-11T20:00:00Z" })),
   checkLocalLogin: vi.fn(async () => ({ status: "sign_in_required" as const })),
   cancelLocalLogin: vi.fn(async () => ({})),
   create: vi.fn(async () => ({ connectionId: "managed-connection", grantId: "managed-grant" })),
@@ -184,19 +186,21 @@ describe("AgentProviderConnection reuse", () => {
     await vi.waitFor(() => expect(host.textContent).toContain(adapterType === "claude_local" ? "claude auth login" : "codex login"));
     expect(host.textContent).toContain("machine running Paperclip");
     expect(host.textContent).not.toContain("sandbox");
+    expect(host.textContent).toContain("Your existing terminal login stays separate");
+    expect(managedApi.startLocalLogin).toHaveBeenCalledWith("c1", intent);
+    expect(managedApi.checkLocalLogin).toHaveBeenCalledWith("c1", { ...intent, localSessionId: "local-attempt" });
     managedApi.connectLocal.mockRejectedValueOnce(new Error("Run local login and try again"));
     click("Connect");
     await vi.waitFor(() => expect(host.textContent).toContain("Run local login and try again"));
     expect(onComplete).not.toHaveBeenCalled();
-    if (adapterType === "codex_local") {
-      click("Start sign-in again");
-      await vi.waitFor(() => expect(host.textContent).not.toContain("Run local login and try again"));
-      await vi.waitFor(() => expect(managedApi.cancelLocalLogin).toHaveBeenCalledWith("c1", "local-attempt"));
-      await vi.waitFor(() => expect(host.textContent).toContain("codex login"));
-    }
+    click("Start sign-in again");
+    await vi.waitFor(() => expect(host.textContent).not.toContain("Run local login and try again"));
+    await vi.waitFor(() => expect(managedApi.cancelLocalLogin).toHaveBeenCalledWith("c1", "local-attempt"));
+    await vi.waitFor(() => expect(managedApi.startLocalLogin).toHaveBeenLastCalledWith("c1", { ...intent, restart: true }));
+    await vi.waitFor(() => expect(host.textContent).toContain(adapterType === "claude_local" ? "claude auth login" : "codex login"));
     click("Connect");
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith({ connectionId: "local-account", grantId: "local-grant", method: "subscription" }));
-    expect(managedApi.connectLocal).toHaveBeenCalledWith("c1", adapterType === "codex_local" ? { ...intent, localSessionId: "local-attempt" } : intent);
+    expect(managedApi.connectLocal).toHaveBeenCalledWith("c1", { ...intent, localSessionId: "local-attempt" });
     expect(mocks.loginPanel).not.toHaveBeenCalled();
   });
   it("leaves a completed local account saved when its host is cancelled", async () => {
