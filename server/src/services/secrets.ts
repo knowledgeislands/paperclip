@@ -3460,7 +3460,27 @@ export function secretService(db: Db | DbTransaction) {
       .then((rows) => rows[0] ?? null);
   }
 
+  /** Acquire the filesystem mutation guard before any credential-row lock.
+   * The callback receives a rotation bound to this guard; calling ordinary
+   * rotate() inside it would attempt to acquire the non-reentrant guard again.
+   * Callers holding a grant lock retain the existing grant -> guard -> secret
+   * ordering used by reconnect. The callback must await all its operations.
+   */
+  async function withRotationLock<T>(secretId: string,
+    operation: (rotate: (input: Parameters<typeof rotateUnlocked>[1], actor?: Parameters<typeof rotateUnlocked>[2]) => ReturnType<typeof rotateUnlocked>) => Promise<T>,
+  ): Promise<T> {
+    const preCheckSecret = await getById(secretId);
+    if (!preCheckSecret) throw notFound("Secret not found");
+    return withAccountHomeSecretMutationLock(undefined, preCheckSecret.companyId, async () => {
+      return operation(async (input, actor) => {
+        if (input.value) await assertAccountHomeCacheDirStillValid(undefined, preCheckSecret.companyId, input.value);
+        return rotateUnlocked(secretId, input, actor);
+      });
+    });
+  }
+
   return {
+    withRotationLock,
     listProviders: () => listSecretProviders(),
 
     checkProviders: () => checkSecretProviders(),
@@ -4592,18 +4612,7 @@ export function secretService(db: Db | DbTransaction) {
       },
       actor?: { userId?: string | null; agentId?: string | null },
     ) => {
-      const preCheckSecret = await getById(secretId);
-      if (!preCheckSecret) throw notFound("Secret not found");
-      return withAccountHomeSecretMutationLock(undefined, preCheckSecret.companyId, async () => {
-        // Same reasoning as `create:` above: check the new value's directory
-        // inside the same lock the write commits under, so a rotate queued
-        // behind an account-home cleanup cannot commit a directory the
-        // cleanup already removed.
-        if (input.value) {
-          await assertAccountHomeCacheDirStillValid(undefined, preCheckSecret.companyId, input.value);
-        }
-        return rotateUnlocked(secretId, input, actor);
-      });
+      return withRotationLock(secretId, rotate => rotate(input, actor));
     },
 
     // A patch can rename a secret (`patch.name`) or move it out of the

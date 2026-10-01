@@ -16,7 +16,8 @@ const localHealth = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("@/api/health", () => ({ healthApi: localHealth }));
 const managedApi = vi.hoisted(() => ({
   list: vi.fn(async () => ({ currentUserId: "user-1", connections: [] })),
-  startLocalLogin: vi.fn(async () => ({ sessionId: "local-attempt", command: "CODEX_HOME='/fixture/login' codex login", expiresAt: "2026-09-11T20:00:00Z" })),
+  startLocalLogin: vi.fn(async (_companyId: string, intent: { provider: string }) => ({ sessionId: "local-attempt",
+    command: intent.provider === "anthropic" ? "CLAUDE_CONFIG_DIR='/fixture/login' claude auth login" : "CODEX_HOME='/fixture/login' codex login", expiresAt: "2026-09-11T20:00:00Z" })),
   checkLocalLogin: vi.fn(async () => ({ status: "sign_in_required" as "sign_in_required" | "ready" })),
   cancelLocalLogin: vi.fn(async () => ({})),
   connectLocal: vi.fn(async () => ({ connectionId: "local-connection", grantId: "local-grant" })),
