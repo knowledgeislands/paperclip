@@ -157,7 +157,9 @@ describeEmbeddedPostgres("issue identifier routes", () => {
       expect(found.body).toMatchObject({ id: issueId, identifier: "REN-17", companyId });
       expect((await request(app).get("/api/issues/BAD-17")).status).toBe(404);
       expect((await request(app).get("/api/issues/OLD-18")).status).toBe(404);
-      expect((await request(app).get("/api/issues/EXT-17")).status).toBe(403);
+      // Company-inaccessible resources use the ordinary not-found response.
+      expect((await request(app).get("/api/issues/EXT-17")).status).toBe(404);
+      expect((await request(app).get("/api/issues/OTH-17")).status).toBe(404);
       const updated = await request(app).patch("/api/issues/OLD-17").send({ priority: "high" });
       expect(updated.status, JSON.stringify(updated.body)).toBe(200);
       expect(updated.body).toMatchObject({ id: issueId, priority: "high" });
