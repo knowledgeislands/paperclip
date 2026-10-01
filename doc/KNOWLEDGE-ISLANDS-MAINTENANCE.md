@@ -21,12 +21,20 @@ Do not add machine-specific configuration or copy the host's captured issue-alia
 
 ## Repairs
 
-| Repair | Source intent | Verification | Upstream relationship |
+| Repair | Owner | Verification | Detail |
 | --- | --- | --- | --- |
-| OpenAI project authentication | Managed OpenAI execution ignores the host user's Codex configuration while retaining project checks. | Auth-boundary regression tests. | Local repair; compare on every upstream update. |
-| Historical issue identifiers | Current identifiers resolve first; historical aliases resolve through a private runtime map. | Synthetic lookup and company-boundary tests; host verifies its retained aliases. | Local repair; remove only after upstream preserves the required historical identities. |
-| Claude subscription renewal | Retain renewable credentials and safely refresh them for shared-agent execution. | Synthetic import, renewal, concurrent refresh and secret-redaction tests. | Local repair; upstream tracking is pending. |
-| Embedded PostgreSQL libraries | Supply missing native library aliases only when the payload needs them. | Host installation checks `initdb --version`. | Remains a host installation workaround; no application-source change is needed. |
+| OpenAI project authentication | Fork | Auth-boundary tests | † |
+| Historical issue identifiers | Fork and runtime map | Lookup and access tests | ‡ |
+| Claude subscription renewal | Fork | Import, renewal and race tests | § |
+| Embedded PostgreSQL libraries | Host installation | Native binary probe | ¶ |
+
+† Managed OpenAI execution ignores the host user's Codex configuration while retaining project checks. Compare this repair on every upstream update.
+
+‡ Current identifiers resolve first; historical aliases resolve through a private runtime map. The host verifies its retained aliases. Retire this repair only when upstream preserves the required historical identities.
+
+§ Retain renewable credentials and safely refresh them for shared-agent execution. Tests cover concurrent renewal and secret redaction. Public upstream tracking is pending.
+
+¶ Supply missing native library aliases only when the payload needs them, then verify `initdb --version`. This remains a host workaround, not an application-source repair.
 
 This table records intended repair scope. Commit history and recorded verification establish which repairs have actually landed. Add the public upstream issue or pull-request URL when one is opened; do not invent a tracking number.
 
