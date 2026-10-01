@@ -1,4 +1,5 @@
 import { documentService } from "./documents.js";
+import { getHistoricalIssueAlias } from "./historical-issue-aliases.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
 import { createdFromIssueCondition } from "./issue-creation-origin.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
@@ -6502,11 +6503,25 @@ export function issueService(db: Db) {
   }
 
   async function getIssueByIdentifier(identifier: string) {
-    const row = await db
+    let row = await db
       .select()
       .from(issues)
       .where(eq(issues.identifier, identifier.toUpperCase()))
       .then((rows) => rows[0] ?? null);
+    if (!row) {
+      const alias = await getHistoricalIssueAlias(identifier);
+      if (alias) {
+        row = await db
+          .select()
+          .from(issues)
+          .where(and(
+            eq(issues.id, alias.issueId),
+            eq(issues.companyId, alias.companyId),
+            eq(issues.issueNumber, alias.issueNumber),
+          ))
+          .then((rows) => rows[0] ?? null);
+      }
+    }
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
     return enriched;
