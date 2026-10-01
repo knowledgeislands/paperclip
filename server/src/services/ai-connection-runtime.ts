@@ -15,6 +15,7 @@ import { decideCodexAuthMerge } from "@paperclipai/adapter-codex-local/server";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 import { decideGrokAuthMerge } from "@paperclipai/adapter-grok-local/server";
+import { refreshClaudeSubscriptionCredential } from "./claude-subscription-auth.js";
 
 export function isAiConnectionBusy(error: unknown): error is HttpError {
   return error instanceof HttpError && error.status === 422 &&
@@ -225,7 +226,44 @@ export async function prepareManagedAiRuntime(
       throw unprocessable(
         "The selected default changed. Retry this execution.",
       );
-    const value = await service.credential(selection);
+    let value = await service.credential(selection);
+    let claudeAccessToken: string | undefined;
+    if (input.binding.provider === "anthropic" && selection.attribution.method === "subscription") {
+      // Refresh centrally before launch. Giving every Claude CLI a rotating
+      // credential file would let concurrent employees spend the same refresh
+      // token. Only this originating grant/secret is ever renewed; an isolated
+      // run receives its access token and cannot write a stale refresh back.
+      const refreshed = await db.transaction(async (tx) => {
+        const [grant] = await tx.select().from(connectionGrants).where(and(
+          eq(connectionGrants.id, selection.grant.id), eq(connectionGrants.companyId, input.companyId),
+        )).for("update");
+        if (!grant || grant.status !== "active") throw unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
+        const ref = grant.credentialSecretRefs.find((r) => r.configPath === "ai.credential");
+        if (!ref) throw unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
+        return secretService(tx).withRotationLock(ref.secretId, async rotate => {
+          const [secret] = await tx.select({ id: companySecrets.id, latestVersion: companySecrets.latestVersion }).from(companySecrets).where(and(
+            eq(companySecrets.id, ref.secretId), eq(companySecrets.companyId, input.companyId),
+          )).for("update");
+          if (!secret) throw unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
+          // Recheck current connection health, membership, defaults and audience
+          // after the lock, rather than refreshing from a stale selection.
+          const lockedService = aiConnectionService(tx as unknown as Db);
+          const lockedSelection = await lockedService.select({ ...input, userId: input.responsibleUserId,
+            model: input.config.model, runnerProvider: input.config.provider, acpxAgent: input.config.acpxAgent });
+          if (lockedSelection.grant.id !== grant.id)
+            throw unprocessable("The selected default changed. Retry this execution.");
+          const current = await lockedService.credential(lockedSelection);
+          const result = await refreshClaudeSubscriptionCredential(current);
+          if (result.value !== current) {
+            await rotate({ value: result.value, expectedLatestVersion: secret.latestVersion }, { userId: grant.subjectUserId });
+            await tx.update(connectionGrants).set({ updatedAt: new Date() }).where(eq(connectionGrants.id, grant.id));
+          }
+          return result;
+        });
+      });
+      value = refreshed.value;
+      claudeAccessToken = refreshed.accessToken;
+    }
     home = await mkdtemp(
       path.join(
         os.tmpdir(),
@@ -256,7 +294,7 @@ export async function prepareManagedAiRuntime(
         { mode: 0o600 },
       );
     if (subscriptionFile) await writeFile(authFile, value, { mode: 0o600 });
-    else env[capability.envKey] = value;
+    else env[capability.envKey] = claudeAccessToken ?? value;
     if (
       input.binding.provider === "openai" &&
       selection.attribution.method === "api_key"

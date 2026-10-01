@@ -108,7 +108,23 @@ grant's credentials. Inherited credential variables are cleared. Conflicting
 project authentication and provider-routing overrides are rejected. Managed
 failure cannot reactivate host or legacy credentials.
 
-A subscription invocation takes no lease. Two invocations of one grant, from
+A Claude subscription stores the isolated login's complete `claudeAiOauth`
+credential in the existing encrypted secret. Before starting a run, Paperclip
+renews a token that expires within five minutes, using Claude Code's first-party
+OAuth protocol. The transaction locks the originating grant and secret, rechecks
+access, and rereads the latest credential before renewal. Concurrent employees
+therefore share one renewal, and a manual rotation is respected. Provider errors
+contain fixed, actionable messages without token values or response bodies.
+
+Claude runs receive only the selected access token in `CLAUDE_CODE_OAUTH_TOKEN`;
+their isolated homes have no refresh token and cleanup cannot overwrite a newer
+credential. Legacy access-only/setup tokens still work but cannot renew; reconnect
+using the separate Paperclip sign-in to enable renewal. Renewal happens before
+each run, not during a running Claude process. A single run lasting beyond its
+access token's expiry may need restarting. Revocation or provider policy can also
+require a new sign-in; automatic renewal does not override either.
+
+A Codex or Grok subscription invocation takes no lease. Two invocations of one grant, from
 the same or a different provider account, run at the same time. At cleanup,
 each invocation re-reads the credential stored at that moment under a row
 lock on the grant, then compares it against its own refreshed copy using the
@@ -178,10 +194,15 @@ the server preserves the managed binding and will not restore legacy fallback.
 
 Local installations do not need a sandbox to connect a subscription. Connections,
 onboarding, and agent setup share `LocalProviderLoginInstructions` and
-`useLocalAiLogin`. In local-trusted mode, Claude checks the operator’s existing
-Claude Code login. Authenticated self-hosted users instead get a separate
-`CLAUDE_CONFIG_DIR` for `claude auth login`; checking and saving only read that
-attempt’s credential files, never the server operator’s account or Keychain.
+`useLocalAiLogin`. Claude gets a separate `CLAUDE_CONFIG_DIR` for `claude auth login`
+in both local-trusted and authenticated deployments. Checking and saving read only
+that attempt's private credential files, or on macOS its own suffixed Keychain
+item, never the server operator's login. The suffix is the first eight hexadecimal
+characters of the SHA-256 hash of the exact login-home path, matching Claude Code.
+The complete renewable credential is retained, including expiry, scopes, client
+identity and subscription metadata. An explicit local-trusted API import of the
+host's existing login remains supported as an access-only credential; its refresh
+token is never copied, so it cannot compete with the operator's CLI.
 
 Codex and Grok start a separate terminal sign-in for each connection or reconnect.
 The shared component shows a server-generated command with a fresh `CODEX_HOME`
@@ -203,7 +224,7 @@ subsequently update only that grant. Reconnect preserves IDs and access settings
 Starting an isolated attempt requires normal company-scoped AI-connection creation
 permission. Checks, completion, cancellation, and resumption are owner-bound.
 Authenticated users cannot import host credentials or use another user’s attempt.
-Claude Keychain reads remain limited to the explicit local-trusted default-home import. A failed verification creates
+Unsuffixed Claude Keychain reads remain limited to the explicit local-trusted default-home API import. A failed verification creates
 no healthy connection. Preview-era Codex/Grok managed connections without the
 isolated-subscription marker require reconnect before another managed execution;
 unmanaged legacy agents retain their existing authentication paths.

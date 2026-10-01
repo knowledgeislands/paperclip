@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 afterEach(() => { flushSync(() => root.unmount()); host.remove(); });
 function Harness({ name = "Account", provider = "openai", enabled = true }: { name?: string; provider?: "anthropic" | "openai"; enabled?: boolean }) {
-  const login = useLocalAiLogin("company", { provider, method: "subscription", name, ownership: "personal", agentIds: [], allAgents: true }, enabled, { allowHostClaude: true });
+  const login = useLocalAiLogin("company", { provider, method: "subscription", name, ownership: "personal", agentIds: [], allAgents: true }, enabled);
   return <><LocalProviderLoginInstructions adapterType={provider === "anthropic" ? "claude_local" : "codex_local"} login={login} /><button onClick={() => void login.connect()}>Connect</button></>;
 }
 it("checks once under StrictMode, preserves renaming and navigation, and cancels only on explicit retry", async () => {
@@ -49,7 +49,8 @@ it.each(["anthropic", "openai"] as const)("detects an already-signed-in %s accou
   await vi.waitFor(() => expect(host.textContent).toContain("is signed in"));
   expect(host.textContent).not.toContain("Run this in a terminal");
   expect(api.connectLocal).not.toHaveBeenCalled();
-  if (provider === "anthropic") expect(api.startLocalLogin).not.toHaveBeenCalled();
+  expect(api.startLocalLogin).toHaveBeenCalledTimes(1);
+  expect(api.checkLocalLogin).toHaveBeenCalledWith("company", expect.objectContaining({ provider, localSessionId: "attempt-1" }));
 });
 it("detects terminal completion on focus without needing a Connect attempt", async () => {
   flushSync(() => root.render(<Harness />));

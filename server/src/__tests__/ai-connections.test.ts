@@ -12,6 +12,7 @@ import { createDb, companies, agents, heartbeatRuns, companyMemberships, connect
 import { startEmbeddedPostgresTestDatabase } from "@paperclipai/db/test-embedded-postgres";
 import { aiConnectionService } from "../services/ai-connections.js";
 import * as executionTarget from "@paperclipai/adapter-utils/execution-target";
+import * as codexAdapter from "@paperclipai/adapter-codex-local/server";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth } from "../services/ai-connection-runtime.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { secretService } from "../services/secrets.js";
@@ -46,6 +47,91 @@ beforeAll(async () => {
 afterAll(async () => { await database?.cleanup(); vi.unstubAllEnvs(); if (home) await rm(home, { recursive: true, force: true }); });
 
 describe("managed AI connections", () => {
+  it("renews a shared Claude subscription once for concurrent employees and injects only the access token", async () => {
+    const owner = "claude-renewal-owner";
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const credential = JSON.stringify({ claudeAiOauth: { accessToken: "expired-access", refreshToken: "renewal-refresh",
+      expiresAt: Date.now() - 1, scopes: ["user:inference"], subscriptionType: "max" } });
+    const saved = await service.save(companyId, owner, { provider: "anthropic", method: "subscription", ownership: "shared", name: "Claude renewal", loginSessionId: "fixture", allAgents: true, agentIds: [] }, credential);
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "renewed-access", refresh_token: "renewed-refresh", expires_in: 28800 })));
+    vi.stubGlobal("fetch", fetch);
+    const runInput = { ...input, responsibleUserId: owner, binding: { provider: "anthropic", method: "subscription", mode: "shared", ...saved } as const, config: { model: "same-model" } };
+    try {
+      const runs = await Promise.all([prepareManagedAiRuntime(db, runInput), prepareManagedAiRuntime(db, runInput)]);
+      try {
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(runs.map(run => run.config.env.CLAUDE_CODE_OAUTH_TOKEN)).toEqual(["renewed-access", "renewed-access"]);
+        expect(runs[0].identity).toBe(runs[1].identity);
+        expect(runs[0].config.env.HOME).not.toBe(runs[1].config.env.HOME);
+        for (const run of runs) await expect(access(path.join(String(run.config.env.CLAUDE_CONFIG_DIR), ".credentials.json"))).rejects.toThrow();
+        const stored = JSON.parse(await service.credential(await service.select({ ...runInput, userId: owner })));
+        expect(stored.claudeAiOauth).toMatchObject({ accessToken: "renewed-access", refreshToken: "renewed-refresh", subscriptionType: "max" });
+        // A manual reconnect while both old runs remain open must survive all
+        // cleanup; Claude children never have a refresh credential to merge.
+        const replacement = JSON.stringify({ claudeAiOauth: { ...stored.claudeAiOauth, accessToken: "manual-access", refreshToken: "manual-refresh" } });
+        await service.save(companyId, owner, { provider: "anthropic", method: "subscription", ownership: "shared", name: "Claude renewal", loginSessionId: "fixture", allAgents: true, agentIds: [], connectionId: saved.connectionId }, replacement);
+        await Promise.all(runs.map(run => run.cleanup()));
+        expect(await service.credential(await service.select({ ...runInput, userId: owner }))).toBe(replacement);
+      } finally { await Promise.all(runs.map(run => run.cleanup())); }
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("reads a manual Claude rotation committed while waiting on the secret lock before deciding to refresh", async () => {
+    const userId = "claude-rotation-race-owner";
+    await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
+    const auth = (accessToken: string, expiresAt: number) => JSON.stringify({ claudeAiOauth: { accessToken, refreshToken: `${accessToken}-refresh`, expiresAt, scopes: ["user:inference"] } });
+    const saved = await service.save(companyId, userId, { provider: "anthropic", method: "subscription", ownership: "personal", name: "Claude lock race", loginSessionId: "fixture", allAgents: true, agentIds: [] }, auth("expired", Date.now() - 1));
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, saved.grantId));
+    const ref = grant.credentialSecretRefs.find(r => r.configPath === "ai.credential")!;
+    let held!: () => void; const acquired = new Promise<void>(resolve => { held = resolve; });
+    let release!: () => void; const released = new Promise<void>(resolve => { release = resolve; });
+    const replacement = auth("manual", Date.now() + 28800 * 1000);
+    const holder = db.transaction(async tx => { await secretService(tx).rotate(ref.secretId, { value: replacement }, { userId }); held(); await released; });
+    await acquired;
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    const runInput = { ...input, responsibleUserId: userId, binding: { provider: "anthropic", method: "subscription", mode: "responsible_user" } as const, config: {} };
+    const preparing = prepareManagedAiRuntime(db, runInput);
+    release(); await holder;
+    try {
+      const run = await preparing;
+      try { expect(run.config.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("manual"); expect(fetch).not.toHaveBeenCalled(); }
+      finally { await run.cleanup(); }
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("allows a manual rotation queued during Claude provider renewal to finish without a lock-order deadlock", async () => {
+    const userId = "claude-inflight-rotation-owner";
+    await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
+    const auth = (accessToken: string, expiresAt: number) => JSON.stringify({ claudeAiOauth: { accessToken, refreshToken: `${accessToken}-refresh`, expiresAt, scopes: ["user:inference"] } });
+    const saved = await service.save(companyId, userId, { provider: "anthropic", method: "subscription", ownership: "personal", name: "Claude inflight rotation", loginSessionId: "fixture", allAgents: true, agentIds: [] }, auth("expired", Date.now() - 1));
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, saved.grantId));
+    const ref = grant.credentialSecretRefs.find(r => r.configPath === "ai.credential")!;
+    let entered!: () => void; const providerEntered = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void; const providerReleased = new Promise<void>(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async () => { entered(); await providerReleased;
+      return new Response(JSON.stringify({ access_token: "renewed", refresh_token: "renewed-refresh", expires_in: 28800 })); }));
+    const runInput = { ...input, responsibleUserId: userId, binding: { provider: "anthropic", method: "subscription", mode: "responsible_user" } as const, config: {} };
+    const preparing = prepareManagedAiRuntime(db, runInput);
+    await providerEntered;
+    const replacement = auth("manual-after-renewal", Date.now() + 28800 * 1000);
+    let attempted!: () => void; const manualGuardAttempted = new Promise<void>(resolve => { attempted = resolve; });
+    const originalGuard = codexAdapter.withAccountHomeSecretMutationLock;
+    const guardSpy = vi.spyOn(codexAdapter, "withAccountHomeSecretMutationLock").mockImplementation(
+      <T>(env: NodeJS.ProcessEnv | undefined, companyId: string, operation: () => Promise<T>) => {
+        attempted(); return originalGuard(env, companyId, operation);
+      });
+    try {
+      const rotation = secretService(db).rotate(ref.secretId, { value: replacement }, { userId });
+      // Prove the manual writer has reached the real guard while the provider
+      // call is still held. Starting a promise alone did not reproduce the old
+      // secret-row -> filesystem-guard deadlock reliably.
+      await manualGuardAttempted;
+      release();
+      const [run] = await Promise.all([preparing, rotation]);
+      try {
+        expect(run.config.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("renewed");
+        expect(await service.credential(await service.select({ ...runInput, userId }))).toBe(replacement);
+      } finally { await run.cleanup(); }
+    } finally { release(); guardSpy.mockRestore(); vi.unstubAllGlobals(); }
+  });
   it.each([
     ["anthropic", "claude_local", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
     ["openai", "codex_local", "CODEX_HOME", "OPENAI_API_KEY"],
@@ -283,10 +369,9 @@ describe("managed AI connections", () => {
     expect(agent.runtimeConfig.aiConnection).toBeUndefined();
   });
   it("runs two Claude subscription executions for the same grant at the same time", async () => {
-    // Claude writes no auth file back to the grant, so two runs share no
-    // mutable state and must not wait for each other.
+    // Claude serializes renewal before launch, but holds no run-long lease.
     const subscription = { ...input, binding: { ...binding, method: "subscription" as const }, responsibleUserId: "alice", config: { model: "same-model" } };
-    const account = (await service.list(companyId, "alice")).find(account => account.provider === "anthropic" && account.method === "subscription")!;
+    const account = (await service.list(companyId, "alice")).find(account => account.provider === "anthropic" && account.method === "subscription" && account.ownerUserId === "alice")!;
     await service.setDefault(companyId, "alice", account.grantId);
     const [first, second] = await Promise.all([prepareManagedAiRuntime(db, subscription), prepareManagedAiRuntime(db, subscription)]);
     try {

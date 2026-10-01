@@ -184,8 +184,18 @@ async function readClaudeTokenFromKeychain(service: string): Promise<string | nu
  * machine-level login. Returns null off macOS.
  */
 export async function readIsolatedClaudeKeychainToken(loginHome: string): Promise<string | null> {
+  const raw = await readIsolatedClaudeKeychainCredential(loginHome);
+  return raw ? parseClaudeCredentialToken(raw) : null;
+}
+
+/** Only an explicit isolated-login import reads renewable credential material. */
+export async function readIsolatedClaudeKeychainCredential(loginHome: string): Promise<string | null> {
   if (process.platform !== "darwin") return null;
-  return readClaudeTokenFromKeychain(isolatedKeychainService(loginHome));
+  try {
+    const { stdout } = await execFileAsync("/usr/bin/security", ["find-generic-password", "-s", isolatedKeychainService(loginHome), "-w"],
+      { timeout: 10000, maxBuffer: 64 * 1024 });
+    return parseClaudeCredentialToken(stdout) ? stdout : null;
+  } catch { return null; }
 }
 
 export async function readClaudeToken(options: { allowKeychain?: boolean } = {}): Promise<string | null> {

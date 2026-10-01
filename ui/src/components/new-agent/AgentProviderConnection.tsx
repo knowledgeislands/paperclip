@@ -121,8 +121,7 @@ export function AgentProviderConnection({
   const localLogin = useLocalAiLogin(companyId, managedAccount?.intent ?? {
     provider: aiProvider, method: "subscription", name: `My ${provider} subscription`,
     ownership: "personal", agentIds: [], allAgents: true,
-  }, canUseLocalLogin && method === "subscription" && !savedSubscription && !storedLogin.data,
-  { allowHostClaude: health.data?.deploymentMode === "local_trusted" });
+  }, canUseLocalLogin && method === "subscription" && !savedSubscription && !storedLogin.data);
   const auth = useQuery({
     queryKey: queryKeys.agents.authSignal(
       companyId,

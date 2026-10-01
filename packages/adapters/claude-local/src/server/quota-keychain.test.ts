@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readClaudeToken, readIsolatedClaudeKeychainToken } from "./quota.js";
+import { readClaudeToken, readIsolatedClaudeKeychainToken, readIsolatedClaudeKeychainCredential } from "./quota.js";
 
 const suffixedService = (dir: string) => `Claude Code-credentials-${createHash("sha256").update(dir).digest("hex").slice(0, 8)}`;
 const mocks = vi.hoisted(() => ({ read: vi.fn(), exec: vi.fn() }));
@@ -8,6 +8,15 @@ vi.mock("node:fs/promises", () => ({ default: { readFile: mocks.read } }));
 vi.mock("node:child_process", () => ({ execFile: Object.assign(vi.fn(), { [Symbol.for("nodejs.util.promisify.custom")]: mocks.exec }) }));
 afterEach(() => { vi.resetAllMocks(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 describe("explicit Claude Keychain import", () => {
+  it("returns full renewable credentials only from the selected isolated item", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    const credential = JSON.stringify({ claudeAiOauth: { accessToken: "isolated", refreshToken: "renewable", expiresAt: 1900000000000 } });
+    mocks.exec.mockResolvedValue({ stdout: credential });
+    await expect(readIsolatedClaudeKeychainCredential("/owned/login")).resolves.toBe(credential);
+    expect(mocks.exec).toHaveBeenCalledTimes(1);
+    expect(mocks.exec).toHaveBeenCalledWith("/usr/bin/security", ["find-generic-password", "-s", suffixedService("/owned/login"), "-w"],
+      expect.objectContaining({ maxBuffer: 64 * 1024 }));
+  });
   it("does not consult Keychain during passive reads", async () => {
     mocks.read.mockRejectedValue(new Error("missing"));
     await expect(readClaudeToken()).resolves.toBeNull();
