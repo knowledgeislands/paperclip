@@ -902,6 +902,23 @@ describe("persistent agent directories", () => {
     for (const runId of deferred) expect(await copies.get(companyId, runId)).toMatchObject({ state: "unavailable", processStoppedAt: null, attempts: 3 });
   });
 
+  it("continues cleanup when both retry-reservation writes fail for the first copy", async () => {
+    const first = await run(), second = await run();
+    for (const [index, copy] of [first, second].entries()) {
+      await db.update(agentInstructionWorkingCopies).set({ state: "unavailable", processStoppedAt: new Date(), updatedAt: new Date(index),
+        errorCode: "INSTRUCTION_COLLECTION_UNAVAILABLE", candidateHash: "preserved", candidateBase64: Buffer.from("candidate").toString("base64") })
+        .where(eq(agentInstructionWorkingCopies.runId, copy.runId));
+    }
+    const before = await copies.get(companyId, first.runId);
+    const failReservation = () => { throw new Error("fixture retry-reservation write failure"); };
+    const update = vi.spyOn(db, "update").mockImplementationOnce(failReservation).mockImplementationOnce(failReservation);
+    try { await copies.recoverCaptured(); } finally { update.mockRestore(); }
+    expect(await copies.get(companyId, first.runId)).toEqual(before);
+    expect(await fs.readFile(path.join(first.localRoot, entryFile), "utf8")).toBe(initial);
+    expect(await copies.get(companyId, second.runId)).toMatchObject({ state: "unavailable", errorCode: "INSTRUCTION_COLLECTION_UNAVAILABLE", candidateHash: "preserved", receipt: { cleanupPending: false } });
+    await expect(fs.stat(second.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it.each([false, true])("does not execute a cached transport after destruction, including an ambiguous stop-proof commit (%s)", async interrupted => {
     const runId = randomUUID(), environmentId = randomUUID(), leaseId = randomUUID(), remoteCwd = "/fixture/cached-task";
     const lease = { id: leaseId, companyId, environmentId, heartbeatRunId: runId, provider: "daytona", providerLeaseId: "cached-fixture" };

@@ -75,10 +75,15 @@ export function agentInstructionWorkingCopyService(db: Db, options: { environmen
   async function recoverDirectoryCleanup(row: Copy, cleanup: () => Promise<unknown>) {
     // Reserve a later retry before I/O, including lock waits. A blocked owner
     // must not occupy every sweep or prevent other copies from being reclaimed.
-    await patch(row, { nextAttemptAt: new Date(Date.now() + 30_000) });
-    try { await cleanup(); }
-    catch (error) {
+    try {
       await patch(row, { nextAttemptAt: new Date(Date.now() + 30_000) });
+      await cleanup();
+    }
+    catch (error) {
+      try { await patch(row, { nextAttemptAt: new Date(Date.now() + 30_000) }); }
+      catch (retryError) {
+        logger.warn({ err: retryError, runId: row.runId }, "Agent file cleanup retry could not be scheduled");
+      }
       logger.warn({ err: error, runId: row.runId }, "Agent file cleanup deferred; save receipt unchanged");
     }
   }
