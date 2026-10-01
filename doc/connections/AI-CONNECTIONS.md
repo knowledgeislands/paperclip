@@ -108,6 +108,11 @@ grant's credentials. Inherited credential variables are cleared. Conflicting
 project authentication and provider-routing overrides are rejected. Managed
 failure cannot reactivate host or legacy credentials.
 
+For managed local Codex runs, the host user's `.codex/config.toml` is excluded
+from the project-override check: the private `CODEX_HOME` prevents that file
+from being inherited. Repository and intermediate parent-directory overrides
+are still rejected. This exception does not apply to Claude or remote targets.
+
 A subscription invocation takes no lease. Two invocations of one grant, from
 the same or a different provider account, run at the same time. At cleanup,
 each invocation re-reads the credential stored at that moment under a row
