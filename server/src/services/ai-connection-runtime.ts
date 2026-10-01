@@ -144,6 +144,9 @@ done`,
     typeof config.cwd === "string" ? path.resolve(config.cwd) : process.cwd();
   for (;;) {
     for (const relative of files) {
+      // Managed Codex runs use an isolated CODEX_HOME. The host user's config
+      // is not a project override and is never inherited by those runs.
+      if (provider === "openai" && directory === os.homedir()) continue;
       try {
         const content = await readFile(path.join(directory, relative), "utf8");
         if (
