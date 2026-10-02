@@ -150,7 +150,16 @@ async function runPnpm(cwd: string, args: string[]) {
 async function writeRegisteredSourceConfig(baseCwd: string, instanceId = "source-instance") {
   const configDir = path.join(baseCwd, ".paperclip");
   await fs.mkdir(configDir, { recursive: true });
-  await fs.writeFile(path.join(configDir, "config.json"), "{}\n", "utf8");
+  await fs.writeFile(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      $meta: { version: 1, updatedAt: "2026-08-06T00:00:00.000Z", source: "configure" },
+      database: { mode: "embedded-postgres" },
+      logging: { mode: "file" },
+      server: {},
+    }),
+    "utf8",
+  );
   await fs.writeFile(
     path.join(configDir, ".env"),
     `PAPERCLIP_INSTANCE_ID=${instanceId}\n`,
