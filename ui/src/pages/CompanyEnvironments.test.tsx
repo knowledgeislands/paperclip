@@ -718,7 +718,9 @@ describe("CompanyEnvironments — test provider button", () => {
     });
     await flushReact();
 
-    expect(getEnvironmentFormPage()).toBeNull();
+    await waitForAssertion(() => {
+      expect(getEnvironmentFormPage()).toBeNull();
+    });
   });
 
   it("opens the edit form on a standalone page with existing values and closes after save", async () => {
